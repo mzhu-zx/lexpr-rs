@@ -10,6 +10,15 @@ use serde_lexpr::{error::Category, from_str, from_value, to_value};
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+
+fn test_de<T>(thing: &T, expected: &Value)
+where
+    T: serde::de::DeserializeOwned + PartialEq + Debug,
+{
+    let deserialized: T = from_value(&expected).unwrap();
+    assert_eq!(&deserialized, thing);
+}
+
 fn test_serde<T>(thing: &T, expected: &Value)
 where
     T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + Debug,
@@ -163,6 +172,16 @@ fn test_complex_enum() {
     test_serde(
         &s,
         &sexp!((Struct (s "hello") (v . (1 2 3)) (t . #(23 1.23 "good bye")))),
+    );
+
+    test_de(
+        &s,
+        &sexp!((Struct :s ("hello") :v (1 2 3) :t #(23 1.23 "good bye"))),
+    );
+
+    test_de(
+        &s,
+        &sexp!((Struct :s (hello) :v (1 2 3) :t #(23 1.23 "good bye"))),
     );
 }
 

@@ -112,10 +112,12 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        self.input
-            .as_str()
-            .ok_or_else(|| invalid_value(self.input, "a string"))
-            .and_then(|s| visitor.visit_borrowed_str(s))
+        (match self.input {
+            Value::Symbol(s) | Value::String(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .ok_or_else(|| invalid_value(self.input, "a string"))
+        .and_then(|s| visitor.visit_borrowed_str(s))
     }
 
     fn deserialize_string<V>(self, visitor: V) -> Result<V::Value>
@@ -257,10 +259,11 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        self.input
-            .as_symbol()
-            .ok_or_else(|| invalid_value(self.input, "symbol"))
-            .and_then(|s| visitor.visit_borrowed_str(s))
+        match self.input {
+            Value::Symbol(s) | Value::Keyword(s) => Ok(s),
+            _ => Err(invalid_value(self.input, "symbol")),
+        }
+        .and_then(|s| visitor.visit_borrowed_str(s))
     }
 
     fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value>
@@ -423,11 +426,15 @@ impl<'de> de::SeqAccess<'de> for VecAccess<'de> {
 
 struct MapAccess<'a> {
     cursor: Option<&'a Cons>,
+    in_kwd_ctx: bool,
 }
 
 impl<'a> MapAccess<'a> {
     fn new(cell: Option<&'a Cons>) -> Self {
-        MapAccess { cursor: cell }
+        MapAccess {
+            cursor: cell,
+            in_kwd_ctx: false,
+        }
     }
 }
 
@@ -440,15 +447,19 @@ impl<'de> de::MapAccess<'de> for MapAccess<'de> {
     {
         match self.cursor {
             None => Ok(None),
-            Some(cell) => cell
-                .car()
-                .as_cons()
-                .ok_or_else(|| invalid_value(cell.car(), "cons cell"))
-                .and_then(|cell| {
+            Some(cell) => match cell.car() {
+                Value::Cons(cell) => {
+                    self.in_kwd_ctx = false;
                     Ok(Some(
                         seed.deserialize(&mut Deserializer::from_value(cell.car()))?,
                     ))
-                }),
+                }
+                it @ Value::Keyword(_) => {
+                    self.in_kwd_ctx = true;
+                    Ok(Some(seed.deserialize(&mut Deserializer::from_value(it))?))
+                }
+                _ => Err(invalid_value(cell.car(), "cons cell or keyword")),
+            },
         }
     }
 
@@ -459,12 +470,24 @@ impl<'de> de::MapAccess<'de> for MapAccess<'de> {
         let cell = self
             .cursor
             .expect("next value requested after end of sequence");
-        let value = cell
-            .car()
-            .as_cons()
-            .ok_or_else(|| invalid_value(cell.car(), "cons cell"))
-            .and_then(|cell| seed.deserialize(&mut Deserializer::from_value(cell.cdr())))?;
-        self.cursor = match cell.cdr() {
+        let (value, rest) = (if self.in_kwd_ctx {
+            cell.cdr()
+                .as_cons()
+                .ok_or_else(|| invalid_value(cell.cdr(), "cons cell"))
+                .map(|v_cell| (v_cell.car(), v_cell.cdr()))
+        } else {
+            cell.car()
+                .as_cons()
+                .ok_or_else(|| invalid_value(cell.car(), "cons cell"))
+                .map(|v_cell| (v_cell.cdr(), cell.cdr()))
+        })
+        .and_then(|(value, rest)| {
+            Ok((
+                seed.deserialize(&mut Deserializer::from_value(value))?,
+                rest,
+            ))
+        })?;
+        self.cursor = match rest {
             Value::Cons(cell) => Some(cell),
             Value::Null => None,
             _ => return Err(invalid_value(cell.cdr(), "end of list or cons cell")),
